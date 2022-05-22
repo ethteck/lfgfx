@@ -5,8 +5,32 @@
 import argparse
 from typing import Dict, List, Optional, Tuple
 from sty import Style, fg  # type: ignore
+import threading
 
 from pygfxd import *  # type: ignore
+
+
+class LFGFXLocal(threading.local):
+    vram: int = 0
+    found_objects: Dict[int, "Chunk"] = {}
+    initialized: bool = False
+
+    def __init__(self, **kw):
+        if self.initialized:
+            raise SystemError("__init__ called too many times")
+        self.initialized = True
+        self.__dict__.update(kw)
+
+    def add_found_object(self, obj: "Chunk"):
+        if (
+            obj.start in self.found_objects
+            and obj.type != self.found_objects[obj.start].type
+        ):
+            print(
+                f"Duplicate objects found at 0x{obj.start:X}: {self.found_objects[obj.start]} and {obj} - ignoring the latter"
+            )
+        else:
+            self.found_objects[obj.start] = obj
 
 
 def auto_int(x):
@@ -69,7 +93,7 @@ class Chunk:
 
     @property
     def addr(self):
-        return vram + self.start
+        return thread_ctx.vram + self.start
 
     def type_color(self):
         if self.display_color:
@@ -83,20 +107,20 @@ class Chunk:
 
         return color + self.type + fg.rs
 
-    def symbol_name(self):
-        return f"D_{self.addr:X}"
+    def symbol_name(self, rom_offset: int):
+        return f"D_{self.addr:X}_{rom_offset + self.start:X}"
 
     def to_yaml(self, rom_offset):
         if self.has_splat_extension:
-            return f"- [0x{rom_offset + self.start:X}, {self.splat_type}, {self.symbol_name()}]\n"
+            return f"- [0x{rom_offset + self.start:X}, {self.splat_type}, {self.symbol_name(rom_offset)}]\n"
         else:
             return f"- [0x{rom_offset + self.start:X}] # {self.type}\n"
 
-    def to_c(self, data: bytes):
+    def to_c(self, data: bytes, rom_offset: int):
         if self.has_splat_extension:
-            return f'#include "path/{self.symbol_name()}.inc.c"\n'
+            return f'#include "path/{self.symbol_name(rom_offset)}.inc.c"\n'
         else:
-            raw_c = f"s32 {self.symbol_name()}[] = " + "{\n"
+            raw_c = f"u8 {self.symbol_name(rom_offset)}[] = " + "{\n"
             raw_c += "    " + ", ".join(f"0x{x:X}" for x in data[self.start : self.end])
             raw_c += "\n};\n"
 
@@ -163,7 +187,7 @@ class Timg(Chunk):
         raise RuntimeError(f"Unknown format / size {self.fmt}, {self.size}")
 
     def to_yaml(self, rom_offset):
-        return f"- [0x{rom_offset + self.start:X}, {self.splat_type}, {self.symbol_name()}, {self.width}, {self.height}]\n"
+        return f"- [0x{rom_offset + self.start:X}, {self.splat_type}, {self.symbol_name(rom_offset)}, {self.width}, {self.height}]\n"
 
     def __init__(
         self,
@@ -207,23 +231,13 @@ def macro_fn():
     return 0
 
 
-def add_found_object(obj: Chunk):
-    if obj.start in found_objects and obj.type != found_objects[obj.start].type:
-        print(
-            f"Duplicate objects found at 0x{obj.start:X}: {found_objects[obj.start]} and {obj}"
-        )
-        return 0
-    found_objects[obj.start] = obj
-    return 0
-
-
 def tlut_handler(addr, idx, count):
     gfxd_printf(f"D_{addr:08X}")
 
-    start = addr - vram
+    start = addr - thread_ctx.vram
     end = start + count * 2
     vtx = Tlut(start, end, idx, count)
-    add_found_object(vtx)
+    thread_ctx.add_found_object(vtx)
     return 0
 
 
@@ -247,10 +261,10 @@ def timg_handler(addr, fmt, size, width, height, pal):
         print(f"Unknown timg size format {size}")
         return 0
 
-    start = addr - vram
+    start = addr - thread_ctx.vram
     end = int(start + num_bytes)
     timg = Timg(start, end, fmt, size, width, height)
-    add_found_object(timg)
+    thread_ctx.add_found_object(timg)
     return 0
 
 
@@ -293,10 +307,10 @@ def light_handler(addr, count):
 def vtx_handler(addr, count):
     gfxd_printf(f"D_{addr:08X}")
 
-    start = addr - vram
+    start = addr - thread_ctx.vram
     end = start + count * 0x10
     vtx = Vtx(start, end, count)
-    add_found_object(vtx)
+    thread_ctx.add_found_object(vtx)
     return 0
 
 
@@ -402,7 +416,7 @@ def splat_chunks(chunks: List[Chunk], data: bytes, rom_offset: int) -> Tuple[str
         if not chunk.has_splat_extension and not empty_line:
             c_code += "\n"
 
-        c_code += chunk.to_c(data)
+        c_code += chunk.to_c(data, rom_offset)
 
         if chunk.has_splat_extension:
             empty_line = False
@@ -413,11 +427,11 @@ def splat_chunks(chunks: List[Chunk], data: bytes, rom_offset: int) -> Tuple[str
     return yaml, c_code
 
 
-def scan_binary(data: bytes, input_vram, gfx_target, endianness) -> List[Chunk]:
+def scan_binary(data: bytes, vram, gfx_target, endianness) -> List[Chunk]:
     pygfxd_init(gfx_target, endianness)
 
-    found_objects.clear()
-    vram = input_vram
+    thread_ctx.found_objects.clear()
+    thread_ctx.vram = vram
 
     chunks: List[Chunk] = []
 
@@ -426,8 +440,8 @@ def scan_binary(data: bytes, input_vram, gfx_target, endianness) -> List[Chunk]:
 
     # Add any elements collected while dlist scanning
     pos = 0
-    for addr in sorted(found_objects.keys()):
-        chunk: Chunk = found_objects[addr]
+    for addr in sorted(thread_ctx.found_objects.keys()):
+        chunk: Chunk = thread_ctx.found_objects[addr]
 
         if addr < pos:
             raise RuntimeError(f"Found object at 0x{addr:08X} before 0x{pos:08X}")
@@ -508,8 +522,7 @@ def main(args):
         raise RuntimeError(f"Unsupported mode {args.mode}")
 
 
-found_objects: Dict[int, Chunk] = {}
-vram: int = 0
+thread_ctx = LFGFXLocal()
 
 if __name__ == "__main__":
     args = parser.parse_args()
