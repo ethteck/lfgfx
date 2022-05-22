@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    name: mypy / black
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v1
+
+    - name: Set up Python 3.8
+      uses: actions/setup-python@v1
+      with:
+        python-version: 3.8
+
+    - name: Install Dependencies
+      run: |
+        pip install mypy
+        pip install black
+        pip install -r requirements.txt
+
+    - name: mypy
+      run: mypy --show-column-numbers --hide-error-context .
+
+    - name: black
+      run: black .

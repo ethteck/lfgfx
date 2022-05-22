@@ -1,3 +1,5 @@
 {
     "python.formatting.provider": "black",
+    "files.eol": "\n",
+    "files.insertFinalNewline": true,
 }
