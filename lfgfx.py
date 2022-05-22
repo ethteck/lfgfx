@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
-import argparse
-from typing import Optional
-from sty import Style, fg
+# LFGFX by Ethan Roseman (ethteck)
 
-from pygfxd import *
+import argparse
+from typing import Dict, List, Optional, Tuple
+from sty import Style, fg  # type: ignore
+
+from pygfxd import *  # type: ignore
 
 
 def auto_int(x):
@@ -23,7 +25,7 @@ parser.add_argument(
 parser.add_argument(
     "--mode",
     help="execution mode",
-    choices=["simple"],
+    choices=["simple", "splat"],
     default="simple",
 )
 parser.add_argument(
@@ -46,21 +48,32 @@ parser.add_argument(
     choices=["f3d", "f3db", "f3dex", "f3dexb", "f3dex2"],
     default="f3dex2",
 )
+parser.add_argument(
+    "--splat-rom-offset",
+    help="start rom offset for this segment (for use with splat mode)",
+    type=auto_int,
+)
 
 
 class Chunk:
     start: int
     end: int
     type: str = "unmapped"
-    color: Optional[Style] = None
+    splat_type: str = "type"
+    display_color: Optional[Style] = None
+    has_splat_extension: bool = False
 
     def __init__(self, start: int, end: int):
         self.start = start
         self.end = end
 
+    @property
+    def addr(self):
+        return vram + self.start
+
     def type_color(self):
-        if self.color:
-            color = self.color
+        if self.display_color:
+            color = self.display_color
         elif self.type == "padding":
             color = fg.da_grey
         elif self.type == "unmapped":
@@ -69,6 +82,28 @@ class Chunk:
             color = fg.white
 
         return color + self.type + fg.rs
+
+    def symbol_name(self):
+        return f"D_{self.addr:X}"
+
+    def to_yaml(self, rom_offset):
+        if self.has_splat_extension:
+            return f"- [0x{rom_offset + self.start:X}, {self.splat_type}, {self.symbol_name()}]\n"
+        else:
+            return f"- [0x{rom_offset + self.start:X}] # {self.type}\n"
+
+    def to_c(self, data: bytes):
+        if self.has_splat_extension:
+            return f'#include "path/{self.symbol_name()}.inc.c"\n'
+        else:
+            raw_c = f"s32 {self.symbol_name()}[] = " + "{\n"
+            raw_c += "    " + ", ".join(f"0x{x:X}" for x in data[self.start : self.end])
+            raw_c += "\n};\n"
+
+            return raw_c
+
+    def raw_chunk(self):
+        return f"{self.start:X} - {self.end:X}"
 
     def __str__(self):
         ret = f"{self.type_color()}: 0x{self.start:X} - 0x{self.end:X}"
@@ -81,38 +116,65 @@ class Chunk:
 
 class Tlut(Chunk):
     type: str = "tlut"
-    color: Style = fg.li_green
-    addr: int
+    splat_type: str = "pal"
+    display_color: Style = fg.li_green
     count: int
+    has_splat_extension: bool = True
 
-    def __init__(self, start: int, end: int, addr: int, idx: int, count: int):
+    def __init__(self, start: int, end: int, idx: int, count: int):
         super().__init__(start, end)
-        self.addr = addr
         self.idx = idx
         self.count = count
 
 
 class Timg(Chunk):
     type: str = "timg"
-    color: Style = fg.li_cyan
-    addr: int
+    display_color: Style = fg.li_cyan
     fmt: str
     size: int
     width: int
     height: int
+    has_splat_extension: bool = True
+
+    @property
+    def splat_type(self):
+        if self.fmt == 0:
+            if self.size == 2:
+                return "rgba16"
+            elif self.size == 3:
+                return "rgba32"
+        elif self.fmt == 2:
+            if self.size == 0:
+                return "ci4"
+            elif self.size == 1:
+                return "ci8"
+        elif self.fmt == 3:
+            if self.size == 0:
+                return "ia4"
+            elif self.size == 1:
+                return "ia8"
+            elif self.size == 2:
+                return "ia16"
+        elif self.fmt == 4:
+            if self.size == 0:
+                return "i4"
+            elif self.size == 1:
+                return "i8"
+        raise RuntimeError(f"Unknown format / size {self.fmt}, {self.size}")
+
+    def to_yaml(self, rom_offset):
+        return f"- [0x{rom_offset + self.start:X}, {self.splat_type}, {self.symbol_name()}, {self.width}, {self.height}]\n"
 
     def __init__(
         self,
         start: int,
         end: int,
-        addr: int,
         fmt: str,
         size: int,
         width: int,
         height: int,
     ):
         super().__init__(start, end)
-        self.addr = addr
         self.fmt = fmt
         self.size = size
         self.width = width
@@ -121,18 +183,20 @@ class Timg(Chunk):
 
 class Dlist(Chunk):
     type: str = "dlist"
-    color: Style = fg.li_blue
+    splat_type: str = "gfx"
+    display_color: Style = fg.li_blue
+    has_splat_extension: bool = True
 
 
 class Vtx(Chunk):
     type: str = "vtx"
-    color: Style = fg.li_green
-    addr: int
+    splat_type: str = "vtx"
+    display_color: Style = fg.li_green
     count: int
+    has_splat_extension: bool = True
 
-    def __init__(self, start: int, end: int, addr: int, count: int):
+    def __init__(self, start: int, end: int, count: int):
         super().__init__(start, end)
-        self.addr = addr
         self.count = count
 
 
@@ -145,7 +209,9 @@ def macro_fn():
 
 def add_found_object(obj: Chunk):
     if obj.start in found_objects and obj.type != found_objects[obj.start].type:
-        print(f"Duplicate objects found at 0x{obj.start:X}: {found_objects[obj.start]} and {obj}")
+        print(
+            f"Duplicate objects found at 0x{obj.start:X}: {found_objects[obj.start]} and {obj}"
+        )
         return 0
     found_objects[obj.start] = obj
     return 0
@@ -153,10 +219,10 @@ def add_found_object(obj: Chunk):
 
 def tlut_handler(addr, idx, count):
     gfxd_printf(f"D_{addr:08X}")
-    
+
     start = addr - vram
     end = start + count * 2
-    vtx = Tlut(start, end, addr, idx, count)
+    vtx = Tlut(start, end, idx, count)
     add_found_object(vtx)
     return 0
 
@@ -165,9 +231,9 @@ def timg_handler(addr, fmt, size, width, height, pal):
     gfxd_printf(f"D_{addr:08X}")
 
     if height == 0:
-        num_bytes = width * width
-    else:
-        num_bytes = width * height
+        height = width
+
+    num_bytes = width * height
 
     if size == 0:
         num_bytes /= 2
@@ -183,7 +249,7 @@ def timg_handler(addr, fmt, size, width, height, pal):
 
     start = addr - vram
     end = int(start + num_bytes)
-    timg = Timg(start, end, addr, fmt, size, width, height)
+    timg = Timg(start, end, fmt, size, width, height)
     add_found_object(timg)
     return 0
 
@@ -229,7 +295,7 @@ def vtx_handler(addr, count):
 
     start = addr - vram
     end = start + count * 0x10
-    vtx = Vtx(start, end, addr, count)
+    vtx = Vtx(start, end, count)
     add_found_object(vtx)
     return 0
 
@@ -241,13 +307,13 @@ def vp_handler(addr):
 
 
 def gfx_noop(data: bytes, endianness) -> bool:
-    idx = 0 if endianness == GfxdEndian.big else 3
+    idx = 0 if endianness == GfxdEndian.big else 3  # type: ignore
     return data[idx] == 0
 
 
 def valid_dlist(data: bytes) -> int:
-    gfxd_input_buffer(data)
-    return gfxd_execute() != -1
+    gfxd_input_buffer(data)  # type: ignore
+    return gfxd_execute() != -1  # type: ignore
 
 
 def find_earliest_start(data: bytes, min: int, end: int, endianness) -> int:
@@ -257,12 +323,19 @@ def find_earliest_start(data: bytes, min: int, end: int, endianness) -> int:
     return min
 
 
-def collect_dlists(data: bytes, endianness) -> list[Dlist]:
-    ret: list[Dlist] = []
-    ends: list[int] = []
+def get_end_dlist_cmd(gfx_target):
+    if gfx_target == gfxd_f3dex2:
+        return b"\xDF\x00\x00\x00\x00\x00\x00\x00"
+    else:
+        return b"\xB8\x00\x00\x00\x00\x00\x00\x00"
+
+
+def collect_dlists(data: bytes, endianness, gfx_target) -> List[Dlist]:
+    ret: List[Dlist] = []
+    ends: List[int] = []
 
     for i in range(0, len(data), 8):
-        if data[i : i + 8] == b"\xDF\x00\x00\x00\x00\x00\x00\x00":
+        if data[i : i + 8] == get_end_dlist_cmd(gfx_target):
             ends.append(i + 8)
 
     min = 0
@@ -305,32 +378,51 @@ def pygfxd_init(target, endianness):
 
 def target_arg_to_object(arg: str):
     if arg == "f3d":
-        return gfxd_f3d
+        return gfxd_f3d  # type: ignore
     elif arg == "f3db":
-        return gfxd_f3db
+        return gfxd_f3db  # type: ignore
     elif arg == "f3dex":
-        return gfxd_f3dex
+        return gfxd_f3dex  # type: ignore
     elif arg == "f3dexb":
-        return gfxd_f3dexb
+        return gfxd_f3dexb  # type: ignore
     elif arg == "f3dex2":
-        return gfxd_f3dex2
+        return gfxd_f3dex2  # type: ignore
     else:
         raise RuntimeError(f"Unknown target {arg}")
 
 
-def scan_binary(data: bytes, input_vram, gfx_target, endianness) -> list[Chunk]:
+def splat_chunks(chunks: List[Chunk], data: bytes, rom_offset: int) -> Tuple[str, str]:
+    yaml = ""
+    c_code = ""
+
+    empty_line = True
+    for chunk in chunks:
+        yaml += chunk.to_yaml(rom_offset)
+
+        if not chunk.has_splat_extension and not empty_line:
+            c_code += "\n"
+
+        c_code += chunk.to_c(data)
+
+        if chunk.has_splat_extension:
+            empty_line = False
+        else:
+            c_code += "\n"
+            empty_line = True
+
+    return yaml, c_code
+
+
+def scan_binary(data: bytes, input_vram, gfx_target, endianness) -> List[Chunk]:
     pygfxd_init(gfx_target, endianness)
 
-    global found_objects
-    found_objects = {}
-
-    global vram
+    found_objects.clear()
     vram = input_vram
 
-    chunks: list[Chunk] = []
+    chunks: List[Chunk] = []
 
     # dlists
-    dlists: list[Chunk] = collect_dlists(data, endianness)
+    dlists: List[Dlist] = collect_dlists(data, endianness, gfx_target)
 
     # Add any elements collected while dlist scanning
     pos = 0
@@ -404,9 +496,20 @@ def main(args):
     if args.mode == "simple":
         for chunk in chunks:
             print(chunk)
+    elif args.mode == "splat":
+        if args.splat_rom_offset is None:
+            raise RuntimeError("Must specify --splat-rom-offset with splat mode")
+        splat_yaml, c_code = splat_chunks(chunks, input_bytes, args.splat_rom_offset)
+        print("\nSplat yaml:\n")
+        print(splat_yaml)
+        print("C code:\n")
+        print(c_code)
     else:
         raise RuntimeError(f"Unsupported mode {args.mode}")
 
+
+found_objects: Dict[int, Chunk] = {}
+vram: int = 0
 
 if __name__ == "__main__":
     args = parser.parse_args()
