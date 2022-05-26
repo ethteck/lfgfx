@@ -61,12 +61,6 @@ parser.add_argument(
     type=auto_int,
 )
 parser.add_argument(
-    "--endianness",
-    help="endianness of the input file",
-    choices=["big", "little"],
-    default="big",
-)
-parser.add_argument(
     "--gfx-target",
     help="gfx target to use",
     choices=["f3d", "f3db", "f3dex", "f3dexb", "f3dex2"],
@@ -108,7 +102,7 @@ class Chunk:
         return color + self.type + fg.rs
 
     def symbol_name(self, rom_offset: int):
-        return f"D_{self.addr:X}_{rom_offset + self.start:X}"
+        return f"D_{self.addr:08X}_{rom_offset + self.start:08X}"
 
     def to_yaml(self, rom_offset):
         if self.has_splat_extension:
@@ -320,9 +314,18 @@ def vp_handler(addr):
     return 0
 
 
-def gfx_noop(data: bytes, endianness) -> bool:
-    idx = 0 if endianness == GfxdEndian.big else 3  # type: ignore
-    return data[idx] == 0
+def is_bad_command(data: bytes, gfx_target) -> bool:
+    if data[0] == 0:
+        return True
+
+    # gBranchZ
+    if gfx_target == gfxd_f3dex2:  # type: ignore
+        if data[0] == 4:
+            return True
+    else:
+        if data[0] == 0xB0:
+            return True
+    return False
 
 
 def valid_dlist(data: bytes) -> int:
@@ -330,9 +333,9 @@ def valid_dlist(data: bytes) -> int:
     return gfxd_execute() != -1  # type: ignore
 
 
-def find_earliest_start(data: bytes, min: int, end: int, endianness) -> int:
+def find_earliest_start(data: bytes, min: int, end: int, gfx_target) -> int:
     for i in range(end - 8, min, -8):
-        if gfx_noop(data[i : i + 8], endianness) or not valid_dlist(data[i:end]):
+        if is_bad_command(data[i : i + 8], gfx_target) or not valid_dlist(data[i:end]):
             return i + 8
     return min
 
@@ -344,7 +347,7 @@ def get_end_dlist_cmd(gfx_target):
         return b"\xB8\x00\x00\x00\x00\x00\x00\x00"
 
 
-def collect_dlists(data: bytes, endianness, gfx_target) -> List[Dlist]:
+def collect_dlists(data: bytes, gfx_target) -> List[Dlist]:
     ret: List[Dlist] = []
     ends: List[int] = []
 
@@ -354,7 +357,7 @@ def collect_dlists(data: bytes, endianness, gfx_target) -> List[Dlist]:
 
     min = 0
     for end in ends:
-        start = find_earliest_start(data, min, end, endianness)
+        start = find_earliest_start(data, min, end, gfx_target)
         ret.append(Dlist(start, end))
         min = end
 
@@ -368,9 +371,8 @@ def is_zeros(data: bytes) -> bool:
     return True
 
 
-def pygfxd_init(target, endianness):
+def pygfxd_init(target):
     gfxd_target(target)
-    gfxd_endian(endianness, 4)
     gfxd_macro_fn(macro_fn)
 
     # callbacks
@@ -410,7 +412,7 @@ def splat_chunks(chunks: List[Chunk], data: bytes, rom_offset: int) -> Tuple[str
     c_code = ""
 
     empty_line = True
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
         yaml += chunk.to_yaml(rom_offset)
 
         if not chunk.has_splat_extension and not empty_line:
@@ -427,8 +429,8 @@ def splat_chunks(chunks: List[Chunk], data: bytes, rom_offset: int) -> Tuple[str
     return yaml, c_code
 
 
-def scan_binary(data: bytes, vram, gfx_target, endianness) -> List[Chunk]:
-    pygfxd_init(gfx_target, endianness)
+def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
+    pygfxd_init(gfx_target)
 
     thread_ctx.found_objects.clear()
     thread_ctx.vram = vram
@@ -436,7 +438,7 @@ def scan_binary(data: bytes, vram, gfx_target, endianness) -> List[Chunk]:
     chunks: List[Chunk] = []
 
     # dlists
-    dlists: List[Dlist] = collect_dlists(data, endianness, gfx_target)
+    dlists: List[Dlist] = collect_dlists(data, gfx_target)
 
     # Add any elements collected while dlist scanning
     pos = 0
@@ -501,11 +503,10 @@ def main(args):
     start = args.start
     end = len(input_bytes) if args.end is None else args.end
     gfx_target = target_arg_to_object(args.gfx_target)
-    endianness = GfxdEndian.big if args.endianness == "big" else GfxdEndian.little
 
     print(f"Scanning input binary {args.in_file} from 0x{start:X} to 0x{end:X}")
 
-    chunks = scan_binary(input_bytes[start:end], args.vram, gfx_target, endianness)
+    chunks = scan_binary(input_bytes[start:end], args.vram, gfx_target)
 
     if args.mode == "simple":
         for chunk in chunks:
