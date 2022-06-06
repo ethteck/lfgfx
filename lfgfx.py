@@ -232,7 +232,7 @@ def tlut_handler(addr, idx, count):
     end = start + count * 2
     vtx = Tlut(start, end, idx, count)
     thread_ctx.add_found_object(vtx)
-    return 0
+    return 1
 
 
 def timg_handler(addr, fmt, size, width, height, pal):
@@ -259,43 +259,43 @@ def timg_handler(addr, fmt, size, width, height, pal):
     end = int(start + num_bytes)
     timg = Timg(start, end, fmt, size, width, height)
     thread_ctx.add_found_object(timg)
-    return 0
+    return 1
 
 
 def cimg_handler(addr, fmt, size, width):
     gfxd_printf(f"D_{addr:08X}")
     print(f"cimg at 0x{addr:08X}, fmt {fmt}, size {size}, width {width}")
-    return 0
+    return 1
 
 
 def zimg_handler(addr):
     gfxd_printf(f"D_{addr:08X}")
     print(f"zimg at 0x{addr:08X}")
-    return 0
+    return 1
 
 
 def dl_handler(addr):
     gfxd_printf(f"D_{addr:08X}")
     # print(f"dl at 0x{addr:08X}")
-    return 0
+    return 1
 
 
 def mtx_handler(addr):
     gfxd_printf(f"D_{addr:08X}")
     print(f"mtx at 0x{addr:08X}")
-    return 0
+    return 1
 
 
 def lookat_handler(addr, count):
     gfxd_printf(f"D_{addr:08X}")
     print(f"lookat at 0x{addr:08X}, count {count}")
-    return 0
+    return 1
 
 
 def light_handler(addr, count):
     gfxd_printf(f"D_{addr:08X}")
     print(f"light at 0x{addr:08X}, count {count}")
-    return 0
+    return 1
 
 
 def vtx_handler(addr, count):
@@ -305,13 +305,13 @@ def vtx_handler(addr, count):
     end = start + count * 0x10
     vtx = Vtx(start, end, count)
     thread_ctx.add_found_object(vtx)
-    return 0
+    return 1
 
 
 def vp_handler(addr):
     gfxd_printf(f"D_{addr:08X}")
     print(f"vp at 0x{addr:08X}")
-    return 0
+    return 1
 
 
 def is_bad_command(data: bytes, gfx_target) -> bool:
