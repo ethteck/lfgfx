@@ -102,7 +102,7 @@ class Chunk:
         return color + self.type + fg.rs
 
     def symbol_name(self, rom_offset: int):
-        return f"D_{self.addr:08X}_{rom_offset + self.start:08X}"
+        return f"D_{self.addr:08X}_{rom_offset + self.start:06X}"
 
     def to_yaml(self, rom_offset):
         if self.has_splat_extension:
@@ -230,8 +230,8 @@ def tlut_handler(addr, idx, count):
 
     start = addr - thread_ctx.vram
     end = start + count * 2
-    vtx = Tlut(start, end, idx, count)
-    thread_ctx.add_found_object(vtx)
+    tlut = Tlut(start, end, idx, count)
+    thread_ctx.add_found_object(tlut)
     return 1
 
 
@@ -337,6 +337,9 @@ def find_earliest_start(data: bytes, min: int, end: int, gfx_target) -> int:
     for i in range(end - 8, min, -8):
         if is_bad_command(data[i : i + 8], gfx_target) or not valid_dlist(data[i:end]):
             return i + 8
+    if i == min + 8:
+        # Consider the first command even if we know this is a dlist
+        valid_dlist(data[min:end])
     return min
 
 
@@ -376,7 +379,7 @@ def pygfxd_init(target):
     gfxd_macro_fn(macro_fn)
 
     # callbacks
-    gfxd_tlut_callback(tlut_handler)  # TODO
+    gfxd_tlut_callback(tlut_handler)
     gfxd_timg_callback(timg_handler)
     gfxd_cimg_callback(cimg_handler)  # TODO
     gfxd_zimg_callback(zimg_handler)  # TODO
