@@ -80,10 +80,14 @@ class Chunk:
     splat_type: str = "type"
     display_color: Optional[Style] = None
     has_splat_extension: bool = False
+    file_ext: str = "inc.c"
 
     def __init__(self, start: int, end: int):
         self.start = start
         self.end = end
+    
+    def __repr__(self):
+        return f"{self.type}: {self.start:X}-{self.end:X}"
 
     @property
     def addr(self):
@@ -112,7 +116,7 @@ class Chunk:
 
     def to_c(self, data: bytes, rom_offset: int):
         if self.has_splat_extension:
-            return f'#include "path/{self.symbol_name(rom_offset)}.inc.c"\n'
+            return f'#include "path/{self.symbol_name(rom_offset)}{self.file_ext}"\n'
         else:
             raw_c = f"u8 {self.symbol_name(rom_offset)}[] = " + "{\n"
             raw_c += "    " + ", ".join(f"0x{x:X}" for x in data[self.start : self.end])
@@ -134,10 +138,11 @@ class Chunk:
 
 class Tlut(Chunk):
     type: str = "tlut"
-    splat_type: str = "pal"
+    splat_type: str = "palette"
     display_color: Style = fg.li_green
     count: int
     has_splat_extension: bool = True
+    file_ext: str = ".pal.inc.c"
 
     def __init__(self, start: int, end: int, idx: int, count: int):
         super().__init__(start, end)
@@ -153,6 +158,7 @@ class Timg(Chunk):
     width: int
     height: int
     has_splat_extension: bool = True
+    file_ext: str = ".png.inc.c"
 
     @property
     def splat_type(self):
@@ -204,6 +210,7 @@ class Dlist(Chunk):
     splat_type: str = "gfx"
     display_color: Style = fg.li_blue
     has_splat_extension: bool = True
+    file_ext: str = ".gfx.inc.c"
 
 
 class Vtx(Chunk):
@@ -212,6 +219,7 @@ class Vtx(Chunk):
     display_color: Style = fg.li_green
     count: int
     has_splat_extension: bool = True
+    file_ext: str = ".vtx.inc.c"
 
     def __init__(self, start: int, end: int, count: int):
         super().__init__(start, end)
@@ -442,16 +450,25 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
 
     # dlists
     dlists: List[Dlist] = collect_dlists(data, gfx_target)
+    sorted_obj_addrs = sorted(thread_ctx.found_objects.keys())
 
     # Add any elements collected while dlist scanning
     pos = 0
-    for addr in sorted(thread_ctx.found_objects.keys()):
+    for i, addr in enumerate(sorted_obj_addrs):
         chunk: Chunk = thread_ctx.found_objects[addr]
 
         if addr < pos:
             raise RuntimeError(f"Found object at 0x{addr:08X} before 0x{pos:08X}")
         elif addr > pos:
             chunks.append(Chunk(pos, addr))
+
+        if i < len(sorted_obj_addrs) -1 and isinstance(chunk, Tlut):
+            # Allow palettes to be truncated (not a full 0x20 bytes)
+            next_chunk = thread_ctx.found_objects[sorted_obj_addrs[i+1]]
+            if chunk.end > next_chunk.start:
+                chunk.end = next_chunk.start
+
+        # Append the current chunk
         chunks.append(chunk)
         pos = chunk.end
     if pos < len(data):
@@ -483,9 +500,17 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
                 chunk.start = dlist.end
                 chunks.insert(chunk_idx, dlist)
         else:
-            raise RuntimeError(
-                f"Not prepared to handle overlapping chunks: {chunk} and {dlist}"
-            )
+            if dlist.start < chunk.end:
+                # [      dlist   ]
+                # [   chunk      ]
+                # chop the beginning off of dlist
+                chunks[chunk_idx + 1].start = dlist.end
+                dlist.start = chunk.end
+                chunks.insert(chunk_idx + 1, dlist)
+            else:
+                raise RuntimeError(
+                    f"Not prepared to handle these overlapping chunks: {chunk} and {dlist}"
+                )
 
     # Remove chunks that are empty
     chunks = [chunk for chunk in chunks if chunk.start < chunk.end]
