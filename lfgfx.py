@@ -458,7 +458,13 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
         chunk: Chunk = thread_ctx.found_objects[addr]
 
         if addr < pos:
-            raise RuntimeError(f"Found object at 0x{addr:08X} before 0x{pos:08X}")
+            if chunk.end > chunks[-1].end:
+                raise RuntimeError("Found chunk that overlaps with and extends past previous chunk")
+            elif chunk.end == chunks[-1].end:
+                raise RuntimeError("Found chunk that overlaps with and extends into end of previous chunk")
+            else:
+                # This chunk is completely contained within the previous chunk
+                chunks[-1].end = chunk.start
         elif addr > pos:
             chunks.append(Chunk(pos, addr))
 
