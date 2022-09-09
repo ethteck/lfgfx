@@ -116,7 +116,7 @@ class Chunk:
 
     def to_c(self, data: bytes, rom_offset: int):
         if self.has_splat_extension:
-            return f'#include "path/{self.symbol_name(rom_offset)}{self.file_ext}"\n'
+            return f'#include "effects/gfx/{self.symbol_name(rom_offset)}{self.file_ext}"\n'
         else:
             raw_c = f"u8 {self.symbol_name(rom_offset)}[] = " + "{\n"
             raw_c += "    " + ", ".join(f"0x{x:X}" for x in data[self.start : self.end])
@@ -346,7 +346,7 @@ def find_earliest_start(data: bytes, min: int, end: int, gfx_target) -> int:
         if is_bad_command(data[i : i + 8], gfx_target) or not valid_dlist(data[i:end]):
             return i + 8
     if i == min + 8:
-        # Consider the first command even if we know this is a dlist
+        # Do a scanning pass from the very beginning to collect other possible references, even though we know the bounds of the dlist at this point
         valid_dlist(data[min:end])
     return min
 
@@ -452,6 +452,8 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
     dlists: List[Dlist] = collect_dlists(data, gfx_target)
     sorted_obj_addrs = sorted(thread_ctx.found_objects.keys())
 
+
+
     # Add any elements collected while dlist scanning
     pos = 0
     for i, addr in enumerate(sorted_obj_addrs):
@@ -461,9 +463,10 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
             if chunk.end > chunks[-1].end:
                 raise RuntimeError("Found chunk that overlaps with and extends past previous chunk")
             elif chunk.end == chunks[-1].end:
-                raise RuntimeError("Found chunk that overlaps with and extends into end of previous chunk")
+                chunks[-1].end = chunk.start
             else:
                 # This chunk is completely contained within the previous chunk
+                # TODO maybe add the leftover part after?
                 chunks[-1].end = chunk.start
         elif addr > pos:
             chunks.append(Chunk(pos, addr))
@@ -509,8 +512,8 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
             if dlist.start < chunk.end:
                 # [      dlist   ]
                 # [   chunk      ]
-                # chop the beginning off of dlist
-                chunks[chunk_idx + 1].start = dlist.end
+                # chop the end off of chunk
+                chunks[chunk_idx + 1].end = dlist.start
                 dlist.start = chunk.end
                 chunks.insert(chunk_idx + 1, dlist)
             else:
@@ -523,9 +526,8 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
 
     # Mark chunks that are filled with 0s as padding
     for chunk in chunks:
-        if chunk.type == "unmapped":
-            if is_zeros(data[chunk.start : chunk.end]):
-                chunk.type = "padding"
+        if chunk.type == "unmapped" and is_zeros(data[chunk.start : chunk.end]):
+            chunk.type = "padding"
 
     return chunks
 
