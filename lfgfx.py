@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# LFGFX by Ethan Roseman (ethteck)
+# lfgfx by Ethan Roseman (ethteck)
 
 import argparse
 from typing import Dict, List, Optional, Tuple
@@ -9,6 +9,11 @@ import threading
 
 from pygfxd import *  # type: ignore
 
+DEBUG = True
+
+def debug(msg: str) -> None:
+    if DEBUG:
+        print(msg)
 
 class LFGFXLocal(threading.local):
     vram: int = 0
@@ -246,7 +251,8 @@ def tlut_handler(addr, idx, count):
 def timg_handler(addr, fmt, size, width, height, pal):
     gfxd_printf(f"D_{addr:08X}")
 
-    if height == 0:
+    if height == 0 or height == -1:
+        # Guess height
         height = width
 
     num_bytes = width * height
@@ -264,6 +270,10 @@ def timg_handler(addr, fmt, size, width, height, pal):
         return 0
 
     start = addr - thread_ctx.vram
+
+    if start < 0:
+        return 0
+
     end = int(start + num_bytes)
     timg = Timg(start, end, fmt, size, width, height)
     thread_ctx.add_found_object(timg)
@@ -272,7 +282,9 @@ def timg_handler(addr, fmt, size, width, height, pal):
 
 def cimg_handler(addr, fmt, size, width):
     gfxd_printf(f"D_{addr:08X}")
-    print(f"cimg at 0x{addr:08X}, fmt {fmt}, size {size}, width {width}")
+
+    if (addr < 0xFFFFFFFF):
+        print(f"cimg at 0x{addr:08X}, fmt {fmt}, size {size}, width {width}")
     return 1
 
 
@@ -333,12 +345,25 @@ def is_bad_command(data: bytes, gfx_target) -> bool:
     else:
         if data[0] == 0xB0:
             return True
+
+    # gsSPModifyVertex
+    if gfx_target == gfxd_f3dex2:  # type: ignore
+        if data[0] == 0x02:
+            if int.from_bytes(data[2:4], byteorder="big") > 63:
+                return True
+    else:
+        if data[0] == 0xB2:
+            if int.from_bytes(data[2:4], byteorder="big") > 79:
+                return True
     return False
+
+def gfxd_scan_bytes(data: bytes) -> int:
+    gfxd_input_buffer(data)  # type: ignore
+    return gfxd_execute()  # type: ignore
 
 
 def valid_dlist(data: bytes) -> int:
-    gfxd_input_buffer(data)  # type: ignore
-    return gfxd_execute() != -1  # type: ignore
+    return gfxd_scan_bytes(data) != -1 # type: ignore
 
 
 def find_earliest_start(data: bytes, min: int, end: int, gfx_target) -> int:
@@ -346,8 +371,9 @@ def find_earliest_start(data: bytes, min: int, end: int, gfx_target) -> int:
         if is_bad_command(data[i : i + 8], gfx_target) or not valid_dlist(data[i:end]):
             return i + 8
     if i == min + 8:
-        # Do a scanning pass from the very beginning to collect other possible references, even though we know the bounds of the dlist at this point
-        valid_dlist(data[min:end])
+        # We know the dlist starts at min
+        # scan the first command since it may reference an object
+        gfxd_scan_bytes(data[min:min + 8])
     return min
 
 
@@ -450,76 +476,43 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
 
     # dlists
     dlists: List[Dlist] = collect_dlists(data, gfx_target)
-    sorted_obj_addrs = sorted(thread_ctx.found_objects.keys())
 
+    chunks.extend(dlists)
+    chunks.extend(thread_ctx.found_objects.values())
 
+    chunks.sort(key=lambda x: x.start)
 
-    # Add any elements collected while dlist scanning
-    pos = 0
-    for i, addr in enumerate(sorted_obj_addrs):
-        chunk: Chunk = thread_ctx.found_objects[addr]
-
-        if addr < pos:
-            if chunk.end > chunks[-1].end:
-                raise RuntimeError("Found chunk that overlaps with and extends past previous chunk")
-            elif chunk.end == chunks[-1].end:
-                chunks[-1].end = chunk.start
+    # Truncate things as needed
+    for i, chunk in enumerate(chunks):
+        if i < len(chunks) - 1 and chunk.end > chunks[i + 1].start:
+            if isinstance(chunk, Timg) or isinstance(chunk, Tlut):
+                # Allow truncation of images, palettes, and vtx blobs
+                debug(f"Truncating {chunk} to end at 0x{chunks[i + 1].start:X}")
+                chunk.end = chunks[i + 1].start
+            elif isinstance(chunk, Vtx):
+                # TODO conditionally truncate vtx blobs
+                pass
+            #     # Allow truncation of vtx blobs under certain conditions
+            #     if (chunks[i + 1].start - chunk.start) % 0x10 == 0:
+            #         debug(f"Truncating {chunk} to end at 0x{chunks[i + 1].start:X}")
+            #         chunk.end = chunks[i + 1].start
+            #     else:
+            #         raise RuntimeError(f"Cannot truncate {chunk} to end at 0x{chunks[i + 1].start:X} - not aligned to 0x10 bytes!")
             else:
-                # This chunk is completely contained within the previous chunk
-                # TODO maybe add the leftover part after?
-                chunks[-1].end = chunk.start
-        elif addr > pos:
-            chunks.append(Chunk(pos, addr))
+                raise RuntimeError("Chunk overlap!")
 
-        if i < len(sorted_obj_addrs) -1 and isinstance(chunk, Tlut):
-            # Allow palettes to be truncated (not a full 0x20 bytes)
-            next_chunk = thread_ctx.found_objects[sorted_obj_addrs[i+1]]
-            if chunk.end > next_chunk.start:
-                chunk.end = next_chunk.start
+    # Fill gaps
+    to_add: List[Chunk] = []
+    for i, chunk in enumerate(chunks):
+        if i < len(chunks) - 1 and chunk.end < chunks[i + 1].start:
+            to_add.append(Chunk(chunk.end, chunks[i + 1].start))
+    chunks.extend(to_add)
+    chunks.sort(key=lambda x: x.start)
 
-        # Append the current chunk
-        chunks.append(chunk)
-        pos = chunk.end
-    if pos < len(data):
-        chunks.append(Chunk(pos, len(data)))
-
-    # Integrate scanned dlists into existing chunks
-    chunk_idx = 0
-    for dlist in dlists:
-        chunk = chunks[chunk_idx]
-
-        while dlist.start >= chunk.end and chunk_idx < len(chunks) - 1:
-            chunk_idx += 1
-            chunk = chunks[chunk_idx]
-
-        if chunk.type == "unmapped":
-            if dlist.start > chunk.start:
-                # Modify unmapped segment to end where the dlist starts
-                if dlist.end == chunk.end:
-                    # [   dlist]
-                    chunk.end = dlist.start
-                    chunks.insert(chunk_idx + 1, dlist)
-                elif dlist.end < chunk.end:
-                    # [   dlist   ]
-                    orig_start = chunk.start
-                    chunk.start = dlist.end
-                    chunks.insert(chunk_idx, dlist)
-                    chunks.insert(chunk_idx, Chunk(orig_start, dlist.start))
-            elif dlist.start == chunk.start:
-                chunk.start = dlist.end
-                chunks.insert(chunk_idx, dlist)
-        else:
-            if dlist.start < chunk.end:
-                # [      dlist   ]
-                # [   chunk      ]
-                # chop the end off of chunk
-                chunks[chunk_idx + 1].end = dlist.start
-                dlist.start = chunk.end
-                chunks.insert(chunk_idx + 1, dlist)
-            else:
-                raise RuntimeError(
-                    f"Not prepared to handle these overlapping chunks: {chunk} and {dlist}"
-                )
+    # Add a chunk for the rest of the file
+    end_pos = chunks[len(chunks) - 1].end
+    if end_pos < len(data):
+        chunks.append(Chunk(end_pos, len(data)))
 
     # Remove chunks that are empty
     chunks = [chunk for chunk in chunks if chunk.start < chunk.end]
