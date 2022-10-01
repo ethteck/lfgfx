@@ -1,3 +1,4 @@
 argparse
+n64img
 pygfxd
 sty

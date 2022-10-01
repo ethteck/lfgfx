@@ -2,4 +2,9 @@
     "python.formatting.provider": "black",
     "files.eol": "\n",
     "files.insertFinalNewline": true,
+    "[python]": {
+        "editor.formatOnSave": true,
+    },
+    "python.linting.mypyEnabled": true,
+    "python.linting.enabled": true,
 }

@@ -3,22 +3,29 @@
 # lfgfx by Ethan Roseman (ethteck)
 
 import argparse
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Type
 from sty import Style, fg  # type: ignore
 import threading
 
+import n64img.image
+
+from pygfxd import GfxdMacroId
 from pygfxd import *  # type: ignore
 
 DEBUG = True
+
 
 def debug(msg: str) -> None:
     if DEBUG:
         print(msg)
 
+
 class LFGFXLocal(threading.local):
     vram: int = 0
     found_objects: Dict[int, "Chunk"] = {}
     initialized: bool = False
+    latest_macro: GfxdMacroId = None
 
     def __init__(self, **kw):
         if self.initialized:
@@ -90,7 +97,7 @@ class Chunk:
     def __init__(self, start: int, end: int):
         self.start = start
         self.end = end
-    
+
     def __repr__(self):
         return f"{self.type}: {self.start:X}-{self.end:X}"
 
@@ -191,6 +198,38 @@ class Timg(Chunk):
                 return "i8"
         raise RuntimeError(f"Unknown format / size {self.fmt}, {self.size}")
 
+    def resize(self, new_end: int):
+        self.end = new_end
+        self.height = (self.end - self.start) // self.width * (2 - self.size)
+
+    def to_file(self, data):
+        outname = Path("timg") / f"{self.start:X}.png"
+
+        imgcls: Type[n64img.image.Image] = None
+        if self.splat_type == "rgba16":
+            imgcls = n64img.image.RGBA16
+        elif self.splat_type == "rgba32":
+            imgcls = n64img.image.RGBA32
+        elif self.splat_type == "ci4":
+            imgcls = n64img.image.CI4
+        elif self.splat_type == "ci8":
+            imgcls = n64img.image.CI8
+        elif self.splat_type == "ia4":
+            imgcls = n64img.image.IA4
+        elif self.splat_type == "ia8":
+            imgcls = n64img.image.IA8
+        elif self.splat_type == "ia16":
+            imgcls = n64img.image.IA16
+        elif self.splat_type == "i4":
+            imgcls = n64img.image.I4
+        elif self.splat_type == "i8":
+            imgcls = n64img.image.I8
+
+        if imgcls is None:
+            raise RuntimeError(f"Unknown format / size {self.fmt}, {self.size}")
+
+        imgcls(data[self.start : self.end], self.width, self.height).write(outname)
+
     def to_yaml(self, rom_offset):
         return f"- [0x{rom_offset + self.start:X}, {self.splat_type}, {self.symbol_name(rom_offset)}, {self.width}, {self.height}]\n"
 
@@ -235,6 +274,8 @@ def macro_fn():
     gfxd_puts("    ")
     gfxd_macro_dflt()
     gfxd_puts(",\n")
+
+    thread_ctx.latest_macro = gfxd_macro_id()
     return 0
 
 
@@ -256,6 +297,10 @@ def timg_handler(addr, fmt, size, width, height, pal):
         height = width
 
     num_bytes = width * height
+
+    # Too small
+    if num_bytes < 8:
+        return 0
 
     if size == 0:
         num_bytes /= 2
@@ -283,8 +328,9 @@ def timg_handler(addr, fmt, size, width, height, pal):
 def cimg_handler(addr, fmt, size, width):
     gfxd_printf(f"D_{addr:08X}")
 
-    if (addr < 0xFFFFFFFF):
-        print(f"cimg at 0x{addr:08X}, fmt {fmt}, size {size}, width {width}")
+    if addr < 0xFFFFFFFF:
+        pass
+        # print(f"cimg at 0x{addr:08X}, fmt {fmt}, size {size}, width {width}")
     return 1
 
 
@@ -334,46 +380,40 @@ def vp_handler(addr):
     return 1
 
 
-def is_bad_command(data: bytes, gfx_target) -> bool:
-    if data[0] == 0:
-        return True
-
-    # gBranchZ
-    if gfx_target == gfxd_f3dex2:  # type: ignore
-        if data[0] == 4:
-            return True
-    else:
-        if data[0] == 0xB0:
-            return True
-
-    # gsSPModifyVertex
-    if gfx_target == gfxd_f3dex2:  # type: ignore
-        if data[0] == 0x02:
-            if int.from_bytes(data[2:4], byteorder="big") > 63:
-                return True
-    else:
-        if data[0] == 0xB2:
-            if int.from_bytes(data[2:4], byteorder="big") > 79:
-                return True
-    return False
-
 def gfxd_scan_bytes(data: bytes) -> int:
     gfxd_input_buffer(data)  # type: ignore
     return gfxd_execute()  # type: ignore
 
 
+def is_bad_command(data: bytes) -> bool:
+    gfxd_scan_bytes(data)
+
+    if thread_ctx.latest_macro == GfxdMacroId.DPNoOp:
+        return True
+
+    if thread_ctx.latest_macro == GfxdMacroId.BranchZ:
+        return True
+
+    if thread_ctx.latest_macro == GfxdMacroId.SPModifyVertex:
+        if data[0] == 0x02:
+            if int.from_bytes(data[2:4], byteorder="big") > 79:
+                return True
+
+    return False
+
+
 def valid_dlist(data: bytes) -> int:
-    return gfxd_scan_bytes(data) != -1 # type: ignore
+    return gfxd_scan_bytes(data) != -1  # type: ignore
 
 
-def find_earliest_start(data: bytes, min: int, end: int, gfx_target) -> int:
+def find_earliest_start(data: bytes, min: int, end: int) -> int:
     for i in range(end - 8, min, -8):
-        if is_bad_command(data[i : i + 8], gfx_target) or not valid_dlist(data[i:end]):
+        if is_bad_command(data[i : i + 8]) or not valid_dlist(data[i:end]):
             return i + 8
     if i == min + 8:
         # We know the dlist starts at min
         # scan the first command since it may reference an object
-        gfxd_scan_bytes(data[min:min + 8])
+        gfxd_scan_bytes(data[min : min + 8])
     return min
 
 
@@ -394,7 +434,7 @@ def collect_dlists(data: bytes, gfx_target) -> List[Dlist]:
 
     min = 0
     for end in ends:
-        start = find_earliest_start(data, min, end, gfx_target)
+        start = find_earliest_start(data, min, end)
         ret.append(Dlist(start, end))
         min = end
 
@@ -485,12 +525,17 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
     # Truncate things as needed
     for i, chunk in enumerate(chunks):
         if i < len(chunks) - 1 and chunk.end > chunks[i + 1].start:
-            if isinstance(chunk, Timg) or isinstance(chunk, Tlut):
-                # Allow truncation of images, palettes, and vtx blobs
+            if isinstance(chunk, Timg):
+                # Allow truncation of images
+                debug(f"Truncating {chunk} to end at 0x{chunks[i + 1].start:X}")
+                chunk.resize(chunks[i + 1].start)
+            elif isinstance(chunk, Tlut):
+                # Allow truncation of palettes
                 debug(f"Truncating {chunk} to end at 0x{chunks[i + 1].start:X}")
                 chunk.end = chunks[i + 1].start
             elif isinstance(chunk, Vtx):
                 # TODO conditionally truncate vtx blobs
+                # raise RuntimeError("Vtx chunk overlap!")
                 pass
             #     # Allow truncation of vtx blobs under certain conditions
             #     if (chunks[i + 1].start - chunk.start) % 0x10 == 0:
@@ -499,7 +544,8 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
             #     else:
             #         raise RuntimeError(f"Cannot truncate {chunk} to end at 0x{chunks[i + 1].start:X} - not aligned to 0x10 bytes!")
             else:
-                raise RuntimeError("Chunk overlap!")
+                # raise RuntimeError("Chunk overlap!")
+                pass
 
     # Fill gaps
     to_add: List[Chunk] = []
@@ -508,6 +554,10 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
             to_add.append(Chunk(chunk.end, chunks[i + 1].start))
     chunks.extend(to_add)
     chunks.sort(key=lambda x: x.start)
+
+    # Add a chunk for the beginning of the file
+    if chunks[0].start != 0:
+        chunks.insert(0, Chunk(0, chunks[0].start))
 
     # Add a chunk for the rest of the file
     end_pos = chunks[len(chunks) - 1].end
@@ -540,6 +590,10 @@ def main(args):
     if args.mode == "simple":
         for chunk in chunks:
             print(chunk)
+
+            if isinstance(chunk, Timg):
+                chunk.to_file(input_bytes)
+
     elif args.mode == "splat":
         if args.splat_rom_offset is None:
             raise RuntimeError("Must specify --splat-rom-offset with splat mode")
