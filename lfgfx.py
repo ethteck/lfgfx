@@ -342,7 +342,7 @@ def zimg_handler(addr):
 
 def dl_handler(addr):
     gfxd_printf(f"D_{addr:08X}")
-    # print(f"dl at 0x{addr:08X}")
+    thread_ctx.add_found_object(Dlist(addr, addr))
     return 1
 
 
@@ -556,7 +556,9 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
     chunks.sort(key=lambda x: x.start)
 
     # Add a chunk for the beginning of the file
-    if chunks[0].start != 0:
+    if len(chunks) == 0:
+        chunks.insert(0, Chunk(0, len(data)))
+    elif chunks[0].start != 0:
         chunks.insert(0, Chunk(0, chunks[0].start))
 
     # Add a chunk for the rest of the file
