@@ -25,7 +25,7 @@ class LFGFXLocal(threading.local):
     vram: int = 0
     found_objects: Dict[int, "Chunk"] = {}
     initialized: bool = False
-    latest_macro: GfxdMacroId = None
+    latest_macro: Optional[GfxdMacroId] = None
 
     def __init__(self, **kw):
         if self.initialized:
@@ -84,7 +84,7 @@ parser.add_argument(
     type=auto_int,
 )
 parser.add_argument(
-    "--gfx",
+    "--known-gfx",
     help="list of file offsets where known display lists begin",
     action="extend",
     nargs="+",
@@ -601,7 +601,7 @@ def main(args):
 
     print(f"Scanning input binary {args.in_file} from 0x{start:X} to 0x{end:X}")
 
-    chunks = scan_binary(input_bytes[start:end], args.vram, gfx_target, args.gfx)
+    chunks = scan_binary(input_bytes[start:end], args.vram, gfx_target, args.known_gfx)
 
     if args.mode == "simple":
         for chunk in chunks:
