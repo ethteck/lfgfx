@@ -25,7 +25,7 @@ class LFGFXLocal(threading.local):
     vram: int = 0
     found_objects: Dict[int, "Chunk"] = {}
     initialized: bool = False
-    latest_macro: GfxdMacroId = None
+    latest_macro: Optional[GfxdMacroId] = None
 
     def __init__(self, **kw):
         if self.initialized:
@@ -81,6 +81,13 @@ parser.add_argument(
 parser.add_argument(
     "--splat-rom-offset",
     help="start rom offset for this segment (for use with splat mode)",
+    type=auto_int,
+)
+parser.add_argument(
+    "--known-gfx",
+    help="list of file offsets where known display lists begin",
+    action="extend",
+    nargs="+",
     type=auto_int,
 )
 
@@ -202,10 +209,10 @@ class Timg(Chunk):
         self.end = new_end
         self.height = (self.end - self.start) // self.width * (2 - self.size)
 
-    def to_file(self, data):
+    def to_file(self, data: bytes) -> None:
         outname = Path("timg") / f"{self.start:X}.png"
 
-        imgcls: Type[n64img.image.Image] = None
+        imgcls: Optional[Type[n64img.image.Image]] = None
         if self.splat_type == "rgba16":
             imgcls = n64img.image.RGBA16
         elif self.splat_type == "rgba32":
@@ -342,7 +349,8 @@ def zimg_handler(addr):
 
 def dl_handler(addr):
     gfxd_printf(f"D_{addr:08X}")
-    # print(f"dl at 0x{addr:08X}")
+    start = addr - thread_ctx.vram
+    thread_ctx.add_found_object(Dlist(start, start))
     return 1
 
 
@@ -406,8 +414,14 @@ def valid_dlist(data: bytes) -> int:
     return gfxd_scan_bytes(data) != -1  # type: ignore
 
 
-def find_earliest_start(data: bytes, min: int, end: int) -> int:
+def find_earliest_start(
+    data: bytes, min: int, end: int, known_dlists: List[int]
+) -> int:
     for i in range(end - 8, min, -8):
+        if i in known_dlists:
+            # scan the first command since it may reference an object
+            gfxd_scan_bytes(data[i : i + 8])
+            return i
         if is_bad_command(data[i : i + 8]) or not valid_dlist(data[i:end]):
             return i + 8
     if i == min + 8:
@@ -424,7 +438,7 @@ def get_end_dlist_cmd(gfx_target):
         return b"\xB8\x00\x00\x00\x00\x00\x00\x00"
 
 
-def collect_dlists(data: bytes, gfx_target) -> List[Dlist]:
+def collect_dlists(data: bytes, gfx_target, known_dlists: List[int]) -> List[Dlist]:
     ret: List[Dlist] = []
     ends: List[int] = []
 
@@ -434,7 +448,7 @@ def collect_dlists(data: bytes, gfx_target) -> List[Dlist]:
 
     min = 0
     for end in ends:
-        start = find_earliest_start(data, min, end)
+        start = find_earliest_start(data, min, end, known_dlists)
         ret.append(Dlist(start, end))
         min = end
 
@@ -506,7 +520,7 @@ def splat_chunks(chunks: List[Chunk], data: bytes, rom_offset: int) -> Tuple[str
     return yaml, c_code
 
 
-def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
+def scan_binary(data: bytes, vram, gfx_target, known_dlists: List[int]) -> List[Chunk]:
     pygfxd_init(gfx_target)
 
     thread_ctx.found_objects.clear()
@@ -515,7 +529,7 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
     chunks: List[Chunk] = []
 
     # dlists
-    dlists: List[Dlist] = collect_dlists(data, gfx_target)
+    dlists: List[Dlist] = collect_dlists(data, gfx_target, known_dlists)
 
     chunks.extend(dlists)
     chunks.extend(thread_ctx.found_objects.values())
@@ -556,7 +570,9 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
     chunks.sort(key=lambda x: x.start)
 
     # Add a chunk for the beginning of the file
-    if chunks[0].start != 0:
+    if len(chunks) == 0:
+        chunks.insert(0, Chunk(0, len(data)))
+    elif chunks[0].start != 0:
         chunks.insert(0, Chunk(0, chunks[0].start))
 
     # Add a chunk for the rest of the file
@@ -585,7 +601,7 @@ def main(args):
 
     print(f"Scanning input binary {args.in_file} from 0x{start:X} to 0x{end:X}")
 
-    chunks = scan_binary(input_bytes[start:end], args.vram, gfx_target)
+    chunks = scan_binary(input_bytes[start:end], args.vram, gfx_target, args.known_gfx)
 
     if args.mode == "simple":
         for chunk in chunks:
