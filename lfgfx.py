@@ -84,6 +84,14 @@ parser.add_argument(
     type=auto_int,
 )
 
+parser.add_argument(
+    "--gfx",
+    help="list of file offsets where known display lists begin",
+    action="extend",
+    nargs="+",
+    type=auto_int,
+)
+
 
 class Chunk:
     start: int
@@ -342,7 +350,8 @@ def zimg_handler(addr):
 
 def dl_handler(addr):
     gfxd_printf(f"D_{addr:08X}")
-    thread_ctx.add_found_object(Dlist(addr, addr))
+    start = addr - thread_ctx.vram
+    thread_ctx.add_found_object(Dlist(start, start))
     return 1
 
 
@@ -424,13 +433,23 @@ def get_end_dlist_cmd(gfx_target):
         return b"\xB8\x00\x00\x00\x00\x00\x00\x00"
 
 
+def find_dlist_end(data: bytes, gfx_target, start) -> int:
+    for i in range(start, len(data), 8):
+        if data[i : i + 8] == get_end_dlist_cmd(gfx_target):
+            break
+
+    return i + 8
+
+
 def collect_dlists(data: bytes, gfx_target) -> List[Dlist]:
     ret: List[Dlist] = []
     ends: List[int] = []
 
-    for i in range(0, len(data), 8):
-        if data[i : i + 8] == get_end_dlist_cmd(gfx_target):
-            ends.append(i + 8)
+    i: int = 0
+    while i < len(data):
+        i = find_dlist_end(data, gfx_target, i)
+        if i != len(data):
+            ends.append(i)
 
     min = 0
     for end in ends:
@@ -439,6 +458,23 @@ def collect_dlists(data: bytes, gfx_target) -> List[Dlist]:
         min = end
 
     return ret
+
+
+def collect_user_dlists(data: bytes, gfx_target, vram, start_addrs) -> List[Dlist]:
+    dlists: List[Dlist] = []
+    called_dlist_vram: List[int] = []
+    called_dlists: List[int] = []
+    vram_end = vram + len(data)
+
+    # find the end of all user provided dlist starts
+    for start in start_addrs:
+        # find end
+        end = find_dlist_end(data, gfx_target, start)
+
+        # append to list
+        dlists.append(Dlist(start, end))
+
+    return dlists
 
 
 def is_zeros(data: bytes) -> bool:
@@ -506,7 +542,7 @@ def splat_chunks(chunks: List[Chunk], data: bytes, rom_offset: int) -> Tuple[str
     return yaml, c_code
 
 
-def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
+def scan_binary(data: bytes, vram, gfx_target, known_dlists: List[int]) -> List[Chunk]:
     pygfxd_init(gfx_target)
 
     thread_ctx.found_objects.clear()
@@ -514,8 +550,29 @@ def scan_binary(data: bytes, vram, gfx_target) -> List[Chunk]:
 
     chunks: List[Chunk] = []
 
+    # user-provided dlists
+    if known_dlists != None:
+        user_dlists: List[Dlist] = collect_user_dlists(
+            data, gfx_target, vram, known_dlists
+        )
+
+        for dlist in user_dlists:
+            if dlist.start == dlist.end:
+                dlist.end = find_dlist_end(data, gfx_target, dlist.start)
+
+            gfxd_scan_bytes(data[dlist.start : dlist.end])
+
     # dlists
     dlists: List[Dlist] = collect_dlists(data, gfx_target)
+
+    # cull dlists that have a matching end with a user-provided dlist, if provided
+    if known_dlists != None:
+        for user_dlist in user_dlists:
+            for dlist in dlists:
+                if user_dlist.end == dlist.end:
+                    dlists.remove(dlist)
+                    break
+        dlists = dlists + user_dlists
 
     chunks.extend(dlists)
     chunks.extend(thread_ctx.found_objects.values())
@@ -587,7 +644,7 @@ def main(args):
 
     print(f"Scanning input binary {args.in_file} from 0x{start:X} to 0x{end:X}")
 
-    chunks = scan_binary(input_bytes[start:end], args.vram, gfx_target)
+    chunks = scan_binary(input_bytes[start:end], args.vram, gfx_target, args.gfx)
 
     if args.mode == "simple":
         for chunk in chunks:
