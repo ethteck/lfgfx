@@ -83,7 +83,6 @@ parser.add_argument(
     help="start rom offset for this segment (for use with splat mode)",
     type=auto_int,
 )
-
 parser.add_argument(
     "--gfx",
     help="list of file offsets where known display lists begin",
@@ -210,10 +209,10 @@ class Timg(Chunk):
         self.end = new_end
         self.height = (self.end - self.start) // self.width * (2 - self.size)
 
-    def to_file(self, data):
+    def to_file(self, data: bytes) -> None:
         outname = Path("timg") / f"{self.start:X}.png"
 
-        imgcls: Type[n64img.image.Image] = None
+        imgcls: Optional[Type[n64img.image.Image]] = None
         if self.splat_type == "rgba16":
             imgcls = n64img.image.RGBA16
         elif self.splat_type == "rgba32":
@@ -415,8 +414,14 @@ def valid_dlist(data: bytes) -> int:
     return gfxd_scan_bytes(data) != -1  # type: ignore
 
 
-def find_earliest_start(data: bytes, min: int, end: int) -> int:
+def find_earliest_start(
+    data: bytes, min: int, end: int, known_dlists: List[int]
+) -> int:
     for i in range(end - 8, min, -8):
+        if i in known_dlists:
+            # scan the first command since it may reference an object
+            gfxd_scan_bytes(data[i : i + 8])
+            return i
         if is_bad_command(data[i : i + 8]) or not valid_dlist(data[i:end]):
             return i + 8
     if i == min + 8:
@@ -441,7 +446,7 @@ def find_dlist_end(data: bytes, gfx_target, start) -> int:
     return i + 8
 
 
-def collect_dlists(data: bytes, gfx_target) -> List[Dlist]:
+def collect_dlists(data: bytes, gfx_target, known_dlists: List[int]) -> List[Dlist]:
     ret: List[Dlist] = []
     ends: List[int] = []
 
@@ -453,28 +458,11 @@ def collect_dlists(data: bytes, gfx_target) -> List[Dlist]:
 
     min = 0
     for end in ends:
-        start = find_earliest_start(data, min, end)
+        start = find_earliest_start(data, min, end, known_dlists)
         ret.append(Dlist(start, end))
         min = end
 
     return ret
-
-
-def collect_user_dlists(data: bytes, gfx_target, vram, start_addrs) -> List[Dlist]:
-    dlists: List[Dlist] = []
-    called_dlist_vram: List[int] = []
-    called_dlists: List[int] = []
-    vram_end = vram + len(data)
-
-    # find the end of all user provided dlist starts
-    for start in start_addrs:
-        # find end
-        end = find_dlist_end(data, gfx_target, start)
-
-        # append to list
-        dlists.append(Dlist(start, end))
-
-    return dlists
 
 
 def is_zeros(data: bytes) -> bool:
@@ -550,29 +538,8 @@ def scan_binary(data: bytes, vram, gfx_target, known_dlists: List[int]) -> List[
 
     chunks: List[Chunk] = []
 
-    # user-provided dlists
-    if known_dlists != None:
-        user_dlists: List[Dlist] = collect_user_dlists(
-            data, gfx_target, vram, known_dlists
-        )
-
-        for dlist in user_dlists:
-            if dlist.start == dlist.end:
-                dlist.end = find_dlist_end(data, gfx_target, dlist.start)
-
-            gfxd_scan_bytes(data[dlist.start : dlist.end])
-
     # dlists
-    dlists: List[Dlist] = collect_dlists(data, gfx_target)
-
-    # cull dlists that have a matching end with a user-provided dlist, if provided
-    if known_dlists != None:
-        for user_dlist in user_dlists:
-            for dlist in dlists:
-                if user_dlist.end == dlist.end:
-                    dlists.remove(dlist)
-                    break
-        dlists = dlists + user_dlists
+    dlists: List[Dlist] = collect_dlists(data, gfx_target, known_dlists)
 
     chunks.extend(dlists)
     chunks.extend(thread_ctx.found_objects.values())
