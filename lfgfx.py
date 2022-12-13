@@ -438,23 +438,13 @@ def get_end_dlist_cmd(gfx_target):
         return b"\xB8\x00\x00\x00\x00\x00\x00\x00"
 
 
-def find_dlist_end(data: bytes, gfx_target, start) -> int:
-    for i in range(start, len(data), 8):
-        if data[i : i + 8] == get_end_dlist_cmd(gfx_target):
-            break
-
-    return i + 8
-
-
 def collect_dlists(data: bytes, gfx_target, known_dlists: List[int]) -> List[Dlist]:
     ret: List[Dlist] = []
     ends: List[int] = []
 
-    i: int = 0
-    while i < len(data):
-        i = find_dlist_end(data, gfx_target, i)
-        if i != len(data):
-            ends.append(i)
+    for i in range(0, len(data), 8):
+        if data[i : i + 8] == get_end_dlist_cmd(gfx_target):
+            ends.append(i + 8)
 
     min = 0
     for end in ends:
